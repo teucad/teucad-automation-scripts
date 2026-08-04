@@ -6,15 +6,18 @@ a proprietary, unencrypted prefix of the BLE "Proximity Pairing" advertisement
 Battery Service. This is the same mechanism iOS itself uses to show AirPods
 battery without an active connection.
 
-The byte layout below (model ID, battery nibble) was reverse-engineered
-against a real AirPods Max: bytes 0-10 are plaintext, the rest is an
-encrypted rotating identifier we don't need. Bytes 3-4 are the big-endian
-model ID (0x0A20 = Lightning, 0x1F20 = USB-C). Byte 6's low nibble is the
-battery level, encoded as 0x0-0x9 = n*10%, 0xA-0xE = 100%, 0xF = unavailable
-- confirmed live against the real device's actual charge level. Byte 6's
-high nibble and byte 7 are typically unused padding on Max (it has one
-battery, not two pods + a case), unlike true earbud AirPods, so this module
-only targets Max and doesn't try to interpret those fields.
+The byte layout below (model ID, battery nibble, charging bit) was
+reverse-engineered live against a real AirPods Max, since public writeups of
+this protocol focus on two-earbud AirPods and don't agree on how a
+single-battery device like Max fills these fields. Bytes 0-10 are plaintext,
+the rest is an encrypted rotating identifier we don't need. Bytes 3-4 are
+the big-endian model ID (0x0A20 = Lightning, 0x1F20 = USB-C). Byte 6's low
+nibble is the battery level, encoded as 0x0-0x9 = n*10%, 0xA-0xE = 100%,
+0xF = unavailable. Byte 7 bit 0x10 is the charging flag, confirmed by
+diffing a broadcast captured while on the charger (0x90) against one
+captured immediately after unplugging (0x80). Byte 6's high nibble and the
+rest of byte 7 are unused on Max (it has one battery, not two pods + a
+case), unlike true earbud AirPods, so this module doesn't interpret them.
 """
 
 import asyncio
@@ -59,8 +62,9 @@ def _parse(data):
     if battery is None:
         return None
 
-    flags = data[7] & 0x0F
-    charging = bool(flags & 0x03)
+    # Confirmed live: byte 7 is 0x90 while on the charger, 0x80 right after
+    # unplugging - bit 0x10 is the charging flag.
+    charging = bool(data[7] & 0x10)
     return {"name": name, "battery": battery, "charging": charging}
 
 
