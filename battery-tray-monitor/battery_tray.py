@@ -267,7 +267,10 @@ def build_tooltip(devices):
     if not devices:
         return "Device Batteries: no devices found"
     shown = sorted(devices, key=lambda d: d["battery"])[:TOOLTIP_MAX_DEVICES]
-    return "\n".join(f"{d['name']}: {d['battery']}%" for d in shown)
+    return "\n".join(
+        f"{d['name']}: {d['battery']}%" + (" (charging)" if d.get("charging") else "")
+        for d in shown
+    )
 
 
 def main():
