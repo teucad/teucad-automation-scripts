@@ -1,0 +1,5 @@
+.venv/
+
+.claude/
+
+battery-tray-monitor/__pycache__/

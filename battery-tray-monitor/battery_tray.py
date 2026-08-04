@@ -5,9 +5,10 @@ are read from four sources: the BLE Battery Service property (see
 battery_query.ps1) that Settings > Bluetooth & devices uses, the inbox HID
 Battery Strength driver which covers USB dongle-based mice/keyboards that
 report battery over standard HID, Logitech's HID++ protocol (see
-logitech_hidpp.py) for Lightspeed/Bolt/Unifying receivers, and AirPods Max
-(see airpods_ble.py), read by passively scanning its BLE advertisements
-since Windows exposes no PnP/WMI property for it. Classic Bluetooth HID
+logitech_hidpp.py) for Lightspeed/Bolt/Unifying receivers, and AirPods/
+AirPods Pro/AirPods Max (see airpods_ble.py), read by passively scanning
+their BLE advertisements since Windows exposes no PnP/WMI property for
+them. Classic Bluetooth HID
 devices using other vendor protocols (e.g. the Logitech K380) are not
 exposed by Windows to any app - that is a platform limitation, not a bug
 here.
@@ -36,28 +37,52 @@ TOOLTIP_MAX_DEVICES = 3
 
 
 class Settings:
-    """Persists user-adjustable options (currently just the refresh interval)."""
+    """Persists user-adjustable options: refresh interval and device display order."""
 
     def __init__(self, path):
         self.path = path
         self.refresh_seconds = DEFAULT_REFRESH_SECONDS
+        self.device_order = []
         self._load()
 
     def _load(self):
         try:
             data = json.loads(self.path.read_text())
-            value = data.get("refresh_seconds")
-            if isinstance(value, (int, float)) and value > 0:
-                self.refresh_seconds = value
         except (OSError, ValueError, json.JSONDecodeError):
+            return
+        value = data.get("refresh_seconds")
+        if isinstance(value, (int, float)) and value > 0:
+            self.refresh_seconds = value
+        order = data.get("device_order")
+        if isinstance(order, list) and all(isinstance(n, str) for n in order):
+            self.device_order = order
+
+    def _save(self):
+        try:
+            self.path.write_text(json.dumps({
+                "refresh_seconds": self.refresh_seconds,
+                "device_order": self.device_order,
+            }))
+        except OSError:
             pass
 
     def set_refresh_seconds(self, value):
         self.refresh_seconds = value
-        try:
-            self.path.write_text(json.dumps({"refresh_seconds": value}))
-        except OSError:
-            pass
+        self._save()
+
+    def set_device_order(self, order):
+        self.device_order = list(order)
+        self._save()
+
+
+def order_devices(devices, order):
+    """Sorts devices by the user's saved order; devices not yet in it (new
+    arrivals) are appended at the end, worst-battery-first, so they're still
+    visible and don't silently displace the user's chosen ordering."""
+    position = {name: i for i, name in enumerate(order)}
+    known = sorted((d for d in devices if d["name"] in position), key=lambda d: position[d["name"]])
+    unknown = sorted((d for d in devices if d["name"] not in position), key=lambda d: d["battery"])
+    return known + unknown
 
 
 def get_peripheral_batteries():
@@ -164,13 +189,20 @@ def make_icon(devices):
 
 WINDOW_WIDTH = 300
 ROW_HEIGHT = 30
+ROW_TOTAL_HEIGHT = ROW_HEIGHT + 6  # + pady (3 top + 3 bottom) from render()'s row.pack
+MAX_VISIBLE_ROWS = 8
 
 
 class BatteryWindow:
-    """Borderless flyout popup - just the device battery list, nothing else."""
+    """Borderless flyout popup - the device battery list, plus small ▲▼
+    controls per row so the user can drag their preferred devices to the
+    top; that order then also drives which devices the tray tooltip shows."""
 
-    def __init__(self, root):
+    def __init__(self, root, settings):
         self.root = root
+        self.settings = settings
+        self.rendered_names = []
+        self._last_hide_time = 0.0
         self.root.withdraw()
         self.root.overrideredirect(True)
         self.root.resizable(False, False)
@@ -179,14 +211,39 @@ class BatteryWindow:
         self.frame = tk.Frame(root, bg="#1e1e1e", padx=14, pady=10)
         self.frame.pack(fill="both", expand=True)
 
-        # zero-height spacer to force a minimum width without freezing height
-        tk.Frame(self.frame, bg="#1e1e1e", width=WINDOW_WIDTH - 28, height=1).pack()
+        # Canvas + inner frame instead of packing rows straight into self.frame:
+        # a plain Frame has no way to cap its own height and scroll the
+        # overflow, so once the device list got past ~5 rows the popup either
+        # ran off the bottom of the screen or got silently clipped by the
+        # window manager. The canvas's explicit height caps it at
+        # MAX_VISIBLE_ROWS and scrolls the rest.
+        self.canvas = tk.Canvas(
+            self.frame, bg="#1e1e1e", highlightthickness=0, width=WINDOW_WIDTH - 28,
+        )
+        self.scrollbar = tk.Scrollbar(
+            self.frame, orient="vertical", command=self.canvas.yview,
+            bg="#1e1e1e", troughcolor="#1e1e1e", activebackground="#555555",
+            highlightthickness=0, bd=0, width=8,
+        )
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
 
-        self.rows_frame = tk.Frame(self.frame, bg="#1e1e1e")
-        self.rows_frame.pack(fill="both", expand=True)
+        self.rows_frame = tk.Frame(self.canvas, bg="#1e1e1e")
+        self._rows_window = self.canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
+        self.rows_frame.bind(
+            "<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.bind(
+            "<Configure>", lambda e: self.canvas.itemconfigure(self._rows_window, width=e.width)
+        )
 
         self.root.bind("<Escape>", lambda e: self.hide())
-        self.root.bind("<Button-1>", lambda e: self.hide())
+        # Dismiss on click-away rather than click-inside: overrideredirect
+        # windows get no FocusOut just from moving the mouse, only from the
+        # user actually clicking another window/the desktop, so this is a
+        # reliable "clicked outside" signal without it firing on every
+        # in-window interaction (e.g. the reorder arrows or scrolling).
+        self.root.bind("<FocusOut>", lambda e: self.hide())
 
     def _placeholder(self, text):
         for child in self.rows_frame.winfo_children():
@@ -194,7 +251,18 @@ class BatteryWindow:
         tk.Label(
             self.rows_frame, text=text, fg="#aaaaaa", bg="#1e1e1e", anchor="w",
         ).pack(fill="x", pady=6)
-        self.root.geometry("")
+        self._resize_to_content()
+
+    def _resize_to_content(self):
+        self.root.update_idletasks()
+        content_height = self.rows_frame.winfo_reqheight()
+        max_height = MAX_VISIBLE_ROWS * ROW_TOTAL_HEIGHT
+        overflowing = content_height > max_height
+        self.canvas.configure(height=min(content_height, max_height))
+        if overflowing:
+            self.scrollbar.pack(side="right", fill="y")
+        else:
+            self.scrollbar.pack_forget()
         self.root.update_idletasks()
         self._reposition()
 
@@ -206,10 +274,20 @@ class BatteryWindow:
             self._placeholder("No trackable devices found.")
             return
 
-        for d in devices:
+        ordered = order_devices(devices, self.settings.device_order)
+        self.rendered_names = [d["name"] for d in ordered]
+
+        for i, d in enumerate(ordered):
             row = tk.Frame(self.rows_frame, bg="#1e1e1e", height=ROW_HEIGHT)
             row.pack(fill="x", pady=3)
             row.pack_propagate(False)
+
+            arrows = tk.Frame(row, bg="#1e1e1e", width=14)
+            arrows.pack(side="left", fill="y")
+            arrows.pack_propagate(False)
+            self._make_arrow(arrows, "▲", i, -1, enabled=i > 0)
+            self._make_arrow(arrows, "▼", i, 1, enabled=i < len(ordered) - 1)
+
             tk.Label(
                 row, text=d["name"], anchor="w", fg="#eeeeee", bg="#1e1e1e",
             ).pack(side="left", fill="x", expand=True)
@@ -220,9 +298,25 @@ class BatteryWindow:
                 row, text=f"{pct}%{suffix}", fg=color, bg="#1e1e1e", anchor="e",
             ).pack(side="right")
 
-        self.root.geometry("")  # let the window auto-size to its natural content size
-        self.root.update_idletasks()
-        self._reposition()
+        self._resize_to_content()
+
+    def _make_arrow(self, parent, symbol, index, direction, enabled):
+        label = tk.Label(
+            parent, text=symbol, font=("Segoe UI", 6),
+            fg="#aaaaaa" if enabled else "#3a3a3a", bg="#1e1e1e",
+            cursor="hand2" if enabled else "arrow",
+        )
+        label.pack(side="top")
+        if enabled:
+            label.bind("<Button-1>", lambda e: self._move(index, direction))
+
+    def _move(self, index, direction):
+        order = list(self.rendered_names)
+        target = index + direction
+        order[index], order[target] = order[target], order[index]
+        self.settings.set_device_order(order)
+        self.render(get_cached_batteries())
+        return "break"
 
     def refresh(self):
         def worker():
@@ -240,42 +334,69 @@ class BatteryWindow:
         y = screen_h - h - 60
         self.root.geometry(f"+{x}+{y}")
 
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
     def show(self):
+        # Map the window before measuring/rendering into it: winfo_reqheight()
+        # and winfo_width()/height() on a still-withdrawn toplevel can return
+        # stale values from whenever it last had a real geometry pass, so
+        # sizing the popup while hidden could leave it stuck at an old size
+        # (this was the actual cause of the popup appearing capped at ~5
+        # devices regardless of how many were actually connected).
+        self.root.deiconify()
         cached = get_cached_batteries()
         if cached:
             self.render(cached)
         else:
             self._placeholder("Loading...")
-        self.root.deiconify()
-        self._reposition()
+        self.canvas.yview_moveto(0)
         self.root.lift()
         self.root.attributes("-topmost", True)
         self.root.focus_force()
+        # bind_all rather than binding the canvas directly, so the wheel
+        # scrolls the list even while the cursor is over a row label/arrow
+        # rather than only over canvas whitespace; scoped to while the popup
+        # is open so it doesn't steal wheel events from other apps.
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.refresh()
 
     def hide(self):
+        self.root.unbind_all("<MouseWheel>")
         self.root.withdraw()
+        self._last_hide_time = time.monotonic()
 
     def toggle(self):
         if self.root.state() == "withdrawn":
+            # Clicking the tray icon to close the popup makes it lose focus
+            # first, which triggers the FocusOut auto-hide above; the click
+            # itself then reaches this handler a beat later (via the Tk
+            # event queue) and would otherwise immediately reopen what the
+            # user just closed. Treat a withdraw that happened moments ago
+            # as "still the same click" rather than as "already closed".
+            if time.monotonic() - self._last_hide_time < 0.3:
+                return
             self.show()
         else:
             self.hide()
 
 
-def build_tooltip(devices):
+def build_tooltip(devices, order):
     if not devices:
         return "Device Batteries: no devices found"
-    shown = sorted(devices, key=lambda d: d["battery"])[:TOOLTIP_MAX_DEVICES]
-    return "\n".join(f"{d['name']}: {d['battery']}%" for d in shown)
+    shown = order_devices(devices, order)[:TOOLTIP_MAX_DEVICES]
+    return "\n".join(
+        f"{d['name']}: {d['battery']}%" + (" (charging)" if d.get("charging") else "")
+        for d in shown
+    )
 
 
 def main():
     airpods_ble.start()
 
-    root = tk.Tk()
-    window = BatteryWindow(root)
     settings = Settings(SETTINGS_PATH)
+    root = tk.Tk()
+    window = BatteryWindow(root, settings)
 
     ui_queue = queue.Queue()
 
@@ -298,7 +419,7 @@ def main():
     def update_icon(icon):
         devices = get_all_batteries()
         icon.icon = make_icon(devices)
-        icon.title = build_tooltip(devices)
+        icon.title = build_tooltip(devices, settings.device_order)
 
     def icon_refresh_loop(icon):
         elapsed = 0
@@ -336,7 +457,8 @@ def main():
     )
     initial_devices = get_all_batteries()
     icon = pystray.Icon(
-        "battery-tray-monitor", make_icon(initial_devices), build_tooltip(initial_devices), menu,
+        "battery-tray-monitor", make_icon(initial_devices),
+        build_tooltip(initial_devices, settings.device_order), menu,
     )
 
     threading.Thread(target=icon.run, daemon=True).start()
