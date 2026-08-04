@@ -6,7 +6,8 @@ Personal Windows automation scripts. Each subfolder is a standalone project — 
 
 - Windows 10/11
 - PowerShell (5.1+, the version that ships with Windows)
-- [Python 3.9+](https://www.python.org/downloads/) on `PATH`, for `battery-tray-monitor`
+- [Python 3.9+](https://www.python.org/downloads/) on `PATH`, for `battery-tray-monitor` (3.10+ for `ollama-aider-setup`)
+- [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) (ships with modern Windows 10/11), for `ollama-aider-setup`
 
 All installers register a per-user **Scheduled Task** to autostart at logon. No admin rights are required — they run under your own account with a "Limited" run level.
 
@@ -111,3 +112,34 @@ Runs unit tests against recorded Razer/non-Razer device-ID strings — no Razer 
 - `RazerAutostart.psm1` — shared matching/launch logic, used by both the watcher and the test harness
 - `RunHidden.vbs` — launches the watcher with zero visible window
 - `Test-RazerAutostart.ps1` — hardware-free test harness
+
+---
+
+## ollama-aider-setup
+
+Two scripts to install and run [Aider](https://aider.chat/) (an AI pair-programming CLI) against a local model served by [Ollama](https://ollama.com/), instead of a paid cloud API.
+
+### 1. Install (once)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ollama-aider-setup\1-Install.ps1
+```
+
+Installs Ollama via `winget` if it isn't already present, installs/upgrades Aider via `pip`, and pulls a model (defaults to `qwen2.5-coder:7b`; pass `-Model "<name>"` for a different one).
+
+### 2. Run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ollama-aider-setup\2-Run-Aider.ps1
+```
+
+Starts the Ollama service in the background if it isn't already running, then launches Aider against a model. With no arguments it prompts you to pick from your installed models and asks for a project folder (defaults to the current directory). Both can be passed directly to skip the prompts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ollama-aider-setup\2-Run-Aider.ps1 -Model "qwen2.5-coder:7b" -ProjectPath "C:\my-projects\project1"
+```
+
+### Files
+
+- `1-Install.ps1` — one-time setup: Ollama, Aider, and a model
+- `2-Run-Aider.ps1` — starts the Ollama service (if needed) and launches Aider against a chosen model/project

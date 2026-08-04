@@ -3,3 +3,5 @@
 .claude/
 
 battery-tray-monitor/__pycache__/
+
+battery-tray-monitor/settings.json
