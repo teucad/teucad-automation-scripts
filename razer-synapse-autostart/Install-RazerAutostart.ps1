@@ -11,8 +11,15 @@ if (-not (Test-Path $scriptPath)) {
     throw "Watcher script not found at $scriptPath"
 }
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+$vbsPath = Join-Path $PSScriptRoot "RunHidden.vbs"
+if (-not (Test-Path $vbsPath)) {
+    throw "Hidden launcher not found at $vbsPath"
+}
+
+# Routed through wscript.exe + WshShell.Run (window style 0) instead of calling
+# powershell.exe directly: -WindowStyle Hidden alone can still flash a console
+# window briefly when Task Scheduler starts it. This path never shows one.
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`""
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
