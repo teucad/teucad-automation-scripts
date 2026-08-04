@@ -1,0 +1,6 @@
+pystray
+pillow
+# cython-hidapi - do NOT also install the "hid" package (pyhidapi), it
+# provides a conflicting module of the same name and breaks this one.
+hidapi
+bleak
