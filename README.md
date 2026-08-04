@@ -1,4 +1,4 @@
-# automate-scripts
+# teucad-automation-scripts
 
 Personal Windows automation scripts. Each subfolder is a standalone project — see below for what each does and how to set it up.
 
