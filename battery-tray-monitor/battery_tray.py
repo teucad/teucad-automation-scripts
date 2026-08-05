@@ -20,10 +20,11 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 import airpods_ble
 import logitech_hidpp
@@ -37,12 +38,19 @@ TOOLTIP_MAX_DEVICES = 3
 
 
 class Settings:
-    """Persists user-adjustable options: refresh interval and device display order."""
+    """Persists user-adjustable options: refresh interval, device display
+    order, and per-device category overrides."""
 
     def __init__(self, path):
         self.path = path
         self.refresh_seconds = DEFAULT_REFRESH_SECONDS
         self.device_order = []
+        # Keyword/model-name matching can't identify a phone from a name
+        # like "eekumbokum" or "4" - a custom Bluetooth name the user set,
+        # and one that isn't even stable across reconnects. This maps such
+        # names (lowercased) straight to a category; edit settings.json's
+        # "category_overrides" by hand for devices with unrecognizable names.
+        self.category_overrides = {}
         self._load()
 
     def _load(self):
@@ -56,12 +64,18 @@ class Settings:
         order = data.get("device_order")
         if isinstance(order, list) and all(isinstance(n, str) for n in order):
             self.device_order = order
+        overrides = data.get("category_overrides")
+        if isinstance(overrides, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in overrides.items()
+        ):
+            self.category_overrides = {k.lower(): v for k, v in overrides.items()}
 
     def _save(self):
         try:
             self.path.write_text(json.dumps({
                 "refresh_seconds": self.refresh_seconds,
                 "device_order": self.device_order,
+                "category_overrides": self.category_overrides,
             }))
         except OSError:
             pass
@@ -72,6 +86,14 @@ class Settings:
 
     def set_device_order(self, order):
         self.device_order = list(order)
+        self._save()
+
+    def set_category_override(self, name, category):
+        self.category_overrides[name.lower().strip()] = category
+        self._save()
+
+    def clear_category_override(self, name):
+        self.category_overrides.pop(name.lower().strip(), None)
         self._save()
 
 
@@ -165,6 +187,204 @@ def battery_color(pct):
     return (40, 167, 69)
 
 
+# Windows exposes no device-class property for any of our battery sources
+# (BLE battery service, HID Battery Strength, HID++, or AirPods BLE
+# advertisements all report only a name), so category is inferred from the
+# device name - generic keywords plus common Logitech model prefixes whose
+# names don't otherwise contain "mouse"/"keyboard" (e.g. "MX Master").
+CATEGORY_KEYWORDS = [
+    ("headphones", ("airpods", "headphone", "headset", "earbud", "earphone", "buds")),
+    ("mouse", (
+        "mouse", "trackball", "mx master", "mx anywhere", "mx vertical", "superstrike",
+        "g pro x superlight", "g303", "g403", "g502", "g602", "g604", "g703", "g903",
+    )),
+    ("keyboard", (
+        "keyboard", "mx keys", "pop keys", "k380", "k400", "k480", "k580", "k780",
+        "k835", "k845", "craft", "g913", "g915",
+    )),
+    ("controller", ("controller", "gamepad", "xbox", "dualsense", "dualshock", "joy-con", "joycon")),
+    ("speaker", ("speaker", "soundbar")),
+    ("trackpad", ("trackpad", "touchpad")),
+    ("phone", ("iphone", "smartphone", "galaxy s", "galaxy z", "galaxy note", "pixel ", "oneplus", "phone")),
+]
+
+# Icon color per category, shown to the left of the device name in the
+# popup window - not on the tray icon. The three AirPods-style earbud
+# sub-categories share the headphones color since they're the same family,
+# just distinguished by icon shape (left/right tilt, and the case).
+CATEGORY_COLORS = {
+    "headphones": (217, 83, 79),
+    "earbud_left": (217, 83, 79),
+    "earbud_right": (217, 83, 79),
+    "earbud_case": (217, 83, 79),
+    "mouse": (74, 144, 217),
+    "keyboard": (124, 92, 191),
+    "controller": (92, 184, 92),
+    "speaker": (224, 160, 48),
+    "trackpad": (32, 178, 170),
+    "phone": (232, 98, 168),
+    "other": (136, 136, 136),
+}
+
+# Display order and labels for the right-click "set category" menu.
+CATEGORY_ORDER = [
+    "mouse", "keyboard", "headphones", "earbud_left", "earbud_right",
+    "earbud_case", "controller", "speaker", "trackpad", "phone", "other",
+]
+CATEGORY_LABELS = {
+    "mouse": "Mouse",
+    "keyboard": "Keyboard",
+    "headphones": "Headphones",
+    "earbud_left": "Earbud (Left)",
+    "earbud_right": "Earbud (Right)",
+    "earbud_case": "Earbud (Case)",
+    "controller": "Controller",
+    "speaker": "Speaker",
+    "trackpad": "Trackpad",
+    "phone": "Phone",
+    "other": "Other",
+}
+
+
+def categorize_device(name, overrides=None):
+    lowered = name.lower()
+    override = (overrides or {}).get(lowered.strip())
+    if override:
+        return override
+    for category, keywords in CATEGORY_KEYWORDS:
+        if any(k in lowered for k in keywords):
+            if category == "headphones":
+                if lowered.endswith("(left)"):
+                    return "earbud_left"
+                if lowered.endswith("(right)"):
+                    return "earbud_right"
+                if lowered.endswith("(case)"):
+                    return "earbud_case"
+            return category
+    return "other"
+
+
+def _icon_mouse(d, s, color):
+    lw = max(2, int(s * 0.05))
+    d.rounded_rectangle([s*0.26, s*0.06, s*0.74, s*0.94], radius=s*0.24, outline=color, width=lw)
+    d.line([s*0.5, s*0.08, s*0.5, s*0.42], fill=color, width=lw)
+
+
+def _icon_keyboard(d, s, color):
+    lw = max(2, int(s * 0.045))
+    d.rounded_rectangle([s*0.04, s*0.26, s*0.96, s*0.74], radius=s*0.08, outline=color, width=lw)
+    for y in (s*0.37, s*0.5, s*0.63):
+        for x in (s*0.16, s*0.315, s*0.5, s*0.685, s*0.84):
+            r = s*0.035
+            d.rectangle([x - r, y - r, x + r, y + r], fill=color)
+
+
+def _icon_headphones(d, s, color):
+    lw = max(2, int(s * 0.06))
+    d.arc([s*0.14, s*0.06, s*0.86, s*0.86], start=180, end=360, fill=color, width=lw)
+    d.rounded_rectangle([s*0.08, s*0.5, s*0.28, s*0.86], radius=s*0.06, outline=color, width=lw)
+    d.rounded_rectangle([s*0.72, s*0.5, s*0.92, s*0.86], radius=s*0.06, outline=color, width=lw)
+
+
+def _icon_controller(d, s, color):
+    lw = max(2, int(s * 0.05))
+    d.rounded_rectangle([s*0.06, s*0.32, s*0.94, s*0.72], radius=s*0.2, outline=color, width=lw)
+    r = s*0.06
+    cx, cy = s*0.3, s*0.52
+    d.line([cx - r, cy, cx + r, cy], fill=color, width=lw)
+    d.line([cx, cy - r, cx, cy + r], fill=color, width=lw)
+    d.ellipse([s*0.62, s*0.44, s*0.72, s*0.54], outline=color, width=max(1, int(lw*0.7)))
+    d.ellipse([s*0.76, s*0.36, s*0.86, s*0.46], outline=color, width=max(1, int(lw*0.7)))
+
+
+def _icon_speaker(d, s, color):
+    lw = max(2, int(s * 0.05))
+    d.rectangle([s*0.1, s*0.38, s*0.34, s*0.62], outline=color, width=lw)
+    d.polygon([(s*0.34, s*0.38), (s*0.62, s*0.16), (s*0.62, s*0.84), (s*0.34, s*0.62)], outline=color, width=lw)
+    d.arc([s*0.68, s*0.28, s*0.86, s*0.72], start=300, end=60, fill=color, width=lw)
+    d.arc([s*0.74, s*0.14, s*0.98, s*0.86], start=300, end=60, fill=color, width=lw)
+
+
+def _icon_trackpad(d, s, color):
+    lw = max(2, int(s * 0.05))
+    d.rounded_rectangle([s*0.08, s*0.14, s*0.92, s*0.86], radius=s*0.1, outline=color, width=lw)
+    d.line([s*0.08, s*0.68, s*0.92, s*0.68], fill=color, width=lw)
+
+
+def _icon_other(d, s, color):
+    lw = max(2, int(s * 0.06))
+    d.ellipse([s*0.2, s*0.2, s*0.8, s*0.8], outline=color, width=lw)
+    r = s*0.08
+    d.ellipse([s*0.5 - r, s*0.5 - r, s*0.5 + r, s*0.5 + r], fill=color)
+
+
+def _draw_earbud(d, s, color, mirror):
+    """A single AirPods-style earbud: a rounded in-ear bud with a stem
+    hanging down and tilted outward - mirrored per side so left/right are
+    visually distinct at a glance."""
+    lw = max(2, int(s * 0.055))
+    sign = -1 if mirror else 1
+    bud_cx = s * 0.5
+    bud_w, bud_h = s * 0.32, s * 0.34
+    bud_box = [bud_cx - bud_w / 2, s * 0.08, bud_cx + bud_w / 2, s * 0.08 + bud_h]
+    d.rounded_rectangle(bud_box, radius=bud_w / 2, outline=color, width=lw)
+    stem_top = (bud_cx, s * 0.08 + bud_h - s * 0.04)
+    stem_bottom = (bud_cx + sign * s * 0.22, s * 0.92)
+    d.line([stem_top, stem_bottom], fill=color, width=lw)
+    r = lw * 0.6
+    d.ellipse([stem_bottom[0] - r, stem_bottom[1] - r, stem_bottom[0] + r, stem_bottom[1] + r], fill=color)
+
+
+def _icon_earbud_left(d, s, color):
+    _draw_earbud(d, s, color, mirror=True)
+
+
+def _icon_earbud_right(d, s, color):
+    _draw_earbud(d, s, color, mirror=False)
+
+
+def _icon_earbud_case(d, s, color):
+    lw = max(2, int(s * 0.055))
+    d.rounded_rectangle([s*0.22, s*0.12, s*0.78, s*0.88], radius=s*0.16, outline=color, width=lw)
+    d.line([s*0.22, s*0.42, s*0.78, s*0.42], fill=color, width=max(2, int(lw * 0.8)))
+    r = s * 0.035
+    d.ellipse([s*0.5 - r, s*0.26 - r, s*0.5 + r, s*0.26 + r], fill=color)
+
+
+def _icon_phone(d, s, color):
+    lw = max(2, int(s * 0.05))
+    d.rounded_rectangle([s*0.32, s*0.06, s*0.68, s*0.94], radius=s*0.08, outline=color, width=lw)
+    d.line([s*0.44, s*0.14, s*0.56, s*0.14], fill=color, width=max(2, int(lw * 0.8)))
+    d.line([s*0.42, s*0.88, s*0.58, s*0.88], fill=color, width=max(2, int(lw * 0.8)))
+
+
+CATEGORY_ICON_DRAW = {
+    "mouse": _icon_mouse,
+    "keyboard": _icon_keyboard,
+    "headphones": _icon_headphones,
+    "earbud_left": _icon_earbud_left,
+    "earbud_right": _icon_earbud_right,
+    "earbud_case": _icon_earbud_case,
+    "controller": _icon_controller,
+    "speaker": _icon_speaker,
+    "trackpad": _icon_trackpad,
+    "phone": _icon_phone,
+    "other": _icon_other,
+}
+
+ICON_DISPLAY_SIZE = 18
+# Drawn at a higher resolution and downsampled with LANCZOS so curves/arcs
+# don't look jagged at the tiny final display size.
+ICON_SUPERSAMPLE = 128
+
+
+def build_category_icon(category):
+    img = Image.new("RGBA", (ICON_SUPERSAMPLE, ICON_SUPERSAMPLE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    CATEGORY_ICON_DRAW[category](draw, ICON_SUPERSAMPLE, CATEGORY_COLORS[category])
+    return img.resize((ICON_DISPLAY_SIZE, ICON_DISPLAY_SIZE), Image.LANCZOS)
+
+
 def make_icon(devices):
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -187,7 +407,14 @@ def make_icon(devices):
     return img
 
 
-WINDOW_WIDTH = 300
+WINDOW_WIDTH = 300      # default/minimum popup width
+WINDOW_MAX_WIDTH = 560  # cap so one very long device name can't take over the screen
+FRAME_PADDING = 14      # matches BatteryWindow.frame's padx
+ARROWS_WIDTH = 14
+ICON_BLOCK_WIDTH = ICON_DISPLAY_SIZE + 2 + 6  # icon width + its packed padx=(2, 6)
+NAME_PCT_GAP = 16       # minimum breathing room between the name and % text
+CANVAS_MIN_WIDTH = WINDOW_WIDTH - FRAME_PADDING * 2
+CANVAS_MAX_WIDTH = WINDOW_MAX_WIDTH - FRAME_PADDING * 2
 ROW_HEIGHT = 30
 ROW_TOTAL_HEIGHT = ROW_HEIGHT + 6  # + pady (3 top + 3 bottom) from render()'s row.pack
 MAX_VISIBLE_ROWS = 8
@@ -196,19 +423,27 @@ MAX_VISIBLE_ROWS = 8
 class BatteryWindow:
     """Borderless flyout popup - the device battery list, plus small ▲▼
     controls per row so the user can drag their preferred devices to the
-    top; that order then also drives which devices the tray tooltip shows."""
+    top; that order then also drives which devices the tray tooltip shows.
+    Right-clicking a row opens a menu to override its category icon."""
 
     def __init__(self, root, settings):
         self.root = root
         self.settings = settings
         self.rendered_names = []
         self._last_hide_time = 0.0
+        # Built once and kept as an instance attribute - Tkinter drops a
+        # PhotoImage as soon as nothing external still references it, even
+        # while a Label is actively displaying it.
+        self._category_icons = {
+            category: ImageTk.PhotoImage(build_category_icon(category), master=root)
+            for category in CATEGORY_COLORS
+        }
         self.root.withdraw()
         self.root.overrideredirect(True)
         self.root.resizable(False, False)
         self.root.configure(bg="#1e1e1e", highlightthickness=1, highlightbackground="#555555")
 
-        self.frame = tk.Frame(root, bg="#1e1e1e", padx=14, pady=10)
+        self.frame = tk.Frame(root, bg="#1e1e1e", padx=FRAME_PADDING, pady=10)
         self.frame.pack(fill="both", expand=True)
 
         # Canvas + inner frame instead of packing rows straight into self.frame:
@@ -218,7 +453,7 @@ class BatteryWindow:
         # window manager. The canvas's explicit height caps it at
         # MAX_VISIBLE_ROWS and scrolls the rest.
         self.canvas = tk.Canvas(
-            self.frame, bg="#1e1e1e", highlightthickness=0, width=WINDOW_WIDTH - 28,
+            self.frame, bg="#1e1e1e", highlightthickness=0, width=CANVAS_MIN_WIDTH,
         )
         self.scrollbar = tk.Scrollbar(
             self.frame, orient="vertical", command=self.canvas.yview,
@@ -248,10 +483,28 @@ class BatteryWindow:
     def _placeholder(self, text):
         for child in self.rows_frame.winfo_children():
             child.destroy()
+        self.canvas.configure(width=CANVAS_MIN_WIDTH)
         tk.Label(
             self.rows_frame, text=text, fg="#aaaaaa", bg="#1e1e1e", anchor="w",
         ).pack(fill="x", pady=6)
         self._resize_to_content()
+
+    def _content_width(self, devices):
+        """Widest row's natural content (name + gap + battery text), so the
+        window grows to fit instead of the name label and the battery
+        percentage overlapping - clamped to CANVAS_MAX_WIDTH so one
+        excessively long device name can't blow the popup up to fill the
+        screen."""
+        font = tkfont.nametofont("TkDefaultFont")
+        widest_row = 0
+        for d in devices:
+            suffix = " ⚡" if d.get("charging") else ""
+            pct_text = f"{d['battery']}%{suffix}"
+            row_content = font.measure(d["name"]) + NAME_PCT_GAP + font.measure(pct_text)
+            widest_row = max(widest_row, row_content)
+        needed = ARROWS_WIDTH + ICON_BLOCK_WIDTH + widest_row
+        max_width = min(CANVAS_MAX_WIDTH, self.root.winfo_screenwidth() - 80 - FRAME_PADDING * 2)
+        return max(CANVAS_MIN_WIDTH, min(max_width, needed))
 
     def _resize_to_content(self):
         self.root.update_idletasks()
@@ -276,29 +529,76 @@ class BatteryWindow:
 
         ordered = order_devices(devices, self.settings.device_order)
         self.rendered_names = [d["name"] for d in ordered]
+        self.canvas.configure(width=self._content_width(ordered))
 
         for i, d in enumerate(ordered):
             row = tk.Frame(self.rows_frame, bg="#1e1e1e", height=ROW_HEIGHT)
             row.pack(fill="x", pady=3)
             row.pack_propagate(False)
 
-            arrows = tk.Frame(row, bg="#1e1e1e", width=14)
+            arrows = tk.Frame(row, bg="#1e1e1e", width=ARROWS_WIDTH)
             arrows.pack(side="left", fill="y")
             arrows.pack_propagate(False)
             self._make_arrow(arrows, "▲", i, -1, enabled=i > 0)
             self._make_arrow(arrows, "▼", i, 1, enabled=i < len(ordered) - 1)
 
-            tk.Label(
-                row, text=d["name"], anchor="w", fg="#eeeeee", bg="#1e1e1e",
-            ).pack(side="left", fill="x", expand=True)
+            icon = self._category_icons[categorize_device(d["name"], self.settings.category_overrides)]
+            icon_label = tk.Label(row, image=icon, bg="#1e1e1e", cursor="hand2")
+            icon_label.pack(side="left", padx=(2, 6))
+
+            name_label = tk.Label(
+                row, text=d["name"], anchor="w", fg="#eeeeee", bg="#1e1e1e", cursor="hand2",
+            )
+            name_label.pack(side="left", fill="x", expand=True)
             pct = d["battery"]
             suffix = " ⚡" if d.get("charging") else ""
             color = "#{:02x}{:02x}{:02x}".format(*battery_color(pct))
-            tk.Label(
-                row, text=f"{pct}%{suffix}", fg=color, bg="#1e1e1e", anchor="e",
-            ).pack(side="right")
+            pct_label = tk.Label(
+                row, text=f"{pct}%{suffix}", fg=color, bg="#1e1e1e", anchor="e", cursor="hand2",
+            )
+            pct_label.pack(side="right")
+
+            # Right-click anywhere on the row to override its detected
+            # category - keyword/model-name matching can't identify a
+            # device with a name like "eekumbokum", and editing
+            # settings.json by hand for that is not something to expect
+            # of the user.
+            for widget in (row, icon_label, name_label, pct_label):
+                widget.bind("<Button-3>", lambda e, name=d["name"]: self._show_category_menu(e, name))
 
         self._resize_to_content()
+
+    def _show_category_menu(self, event, name):
+        current_override = self.settings.category_overrides.get(name.lower().strip(), "")
+        auto_category = categorize_device(name)
+
+        menu = tk.Menu(
+            self.root, tearoff=0, bg="#2a2a2a", fg="#eeeeee",
+            activebackground="#3a3a3a", activeforeground="#ffffff",
+        )
+        selected = tk.StringVar(value=current_override)
+
+        def choose(category):
+            if category:
+                self.settings.set_category_override(name, category)
+            else:
+                self.settings.clear_category_override(name)
+            self.render(get_cached_batteries())
+
+        menu.add_radiobutton(
+            label=f"Auto-detect ({CATEGORY_LABELS[auto_category]})",
+            variable=selected, value="", command=lambda: choose(None),
+        )
+        menu.add_separator()
+        for category in CATEGORY_ORDER:
+            menu.add_radiobutton(
+                label=CATEGORY_LABELS[category], variable=selected, value=category,
+                command=lambda c=category: choose(c),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _make_arrow(self, parent, symbol, index, direction, enabled):
         label = tk.Label(
