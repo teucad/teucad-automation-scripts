@@ -29,10 +29,24 @@ if (-not (Test-Command "ollama")) {
 Write-Host ""
 Write-Host "=== 2) Checking Python / pip ===" -ForegroundColor Cyan
 if (-not (Test-Command "python") -and -not (Test-Command "py")) {
-    Write-Host "Python not found. Install Python 3.10+ from https://www.python.org/downloads/ and re-run this script." -ForegroundColor Red
-    exit 1
+    if (-not (Test-Command "winget")) {
+        Write-Host "Python not found and winget isn't available. Install Python 3.10+ from https://www.python.org/downloads/ and re-run this script." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Python not found, installing via winget..." -ForegroundColor Yellow
+    winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements
+
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+
+    if (-not (Test-Command "python") -and -not (Test-Command "py")) {
+        Write-Host "Python was installed but isn't on PATH yet. Close and reopen your terminal (or log off/on), then re-run this script." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "Python is already installed." -ForegroundColor Green
 }
-Write-Host "Python found." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== 3) Installing Aider (pip) ===" -ForegroundColor Cyan

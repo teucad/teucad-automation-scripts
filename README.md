@@ -6,10 +6,11 @@ Personal Windows automation scripts. Each subfolder is a standalone project — 
 
 - Windows 10/11
 - PowerShell (5.1+, the version that ships with Windows)
-- [Python 3.9+](https://www.python.org/downloads/) on `PATH`, for `battery-tray-monitor` (3.10+ for `ollama-aider-setup`)
-- [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) (ships with modern Windows 10/11), for `ollama-aider-setup`
+- [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) (ships with modern Windows 10/11) — used to auto-install Python for `battery-tray-monitor` and `ollama-aider-setup` if it isn't already on `PATH`
 
 All installers register a per-user **Scheduled Task** to autostart at logon. No admin rights are required — they run under your own account with a "Limited" run level.
+
+The `battery-tray-monitor` and `ollama-aider-setup` install/start scripts install Python (via `winget`, if missing) and their pip requirements automatically — no manual `venv`/`pip` setup needed.
 
 ## Clone
 
@@ -37,18 +38,16 @@ Classic-Bluetooth-only HID devices using a vendor's proprietary protocol (e.g. a
 
 ### Setup
 
-```powershell
-python -m venv .venv
-.venv\Scripts\pip install -r battery-tray-monitor\requirements.txt
-```
+No manual setup needed — both entry points below install Python (via `winget`, if it's missing) and create `.venv` with the pip requirements automatically via `Ensure-Env.ps1`.
 
-Run it directly (useful for testing — console stays open):
+To start it manually without a console window (e.g. via a desktop/Start Menu shortcut), double-click `battery-tray-monitor\Start-BatteryTray.vbs` — it ensures the environment is set up, then launches the app via `pythonw.exe`.
+
+To run it directly instead (useful for testing — console stays open, and lets you see install/setup output the first time):
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Ensure-Env.ps1
 .venv\Scripts\python battery-tray-monitor\battery_tray.py
 ```
-
-To start it manually without a console window (e.g. via a desktop/Start Menu shortcut), double-click `battery-tray-monitor\Start-BatteryTray.vbs` instead — it launches the same app via `pythonw.exe`.
 
 ### Autostart at logon
 
@@ -56,7 +55,7 @@ To start it manually without a console window (e.g. via a desktop/Start Menu sho
 powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Install-BatteryTrayAutostart.ps1
 ```
 
-Registers a scheduled task that launches the app hidden (via `pythonw.exe`, no console window) at every logon, and starts it immediately. To remove it:
+Ensures Python/the venv/requirements are installed, then registers a scheduled task that launches the app hidden (via `pythonw.exe`, no console window) at every logon, and starts it immediately. To remove it:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Uninstall-BatteryTrayAutostart.ps1
@@ -69,7 +68,8 @@ powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Uninstall-BatteryT
 - `logitech_hidpp.py` — Logitech receiver/mouse battery via HID++
 - `battery_query.ps1` — BLE Battery Service + generic HID Battery Strength queries
 - `settings.json` — persisted refresh interval and device display order (created/updated automatically)
-- `Start-BatteryTray.vbs` — double-click entry point that starts the app with no console window
+- `Ensure-Env.ps1` — installs Python (via `winget`, if missing), creates `.venv`, and installs `requirements.txt`; used by both the installer and the manual start scripts
+- `Start-BatteryTray.ps1` / `Start-BatteryTray.vbs` — manual entry point that ensures the environment, then starts the app with no console window
 
 ---
 
@@ -128,7 +128,7 @@ Two scripts to install and run [Aider](https://aider.chat/) (an AI pair-programm
 powershell -ExecutionPolicy Bypass -File ollama-aider-setup\1-Install.ps1
 ```
 
-Installs Ollama via `winget` if it isn't already present, installs/upgrades Aider via `pip`, and pulls a model (defaults to `qwen2.5-coder:7b`; pass `-Model "<name>"` for a different one).
+Installs Python via `winget` if it isn't already present, installs Ollama via `winget` if it isn't already present, installs/upgrades Aider via `pip`, and pulls a model (defaults to `qwen2.5-coder:7b`; pass `-Model "<name>"` for a different one).
 
 ### 2. Run
 

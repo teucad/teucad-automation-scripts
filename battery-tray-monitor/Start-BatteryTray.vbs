@@ -1,22 +1,14 @@
 ' Double-click entry point for starting the battery tray monitor manually
-' with zero visible console window. Prefers pythonw.exe (no console by
-' design, same as the scheduled-task autostart in
-' Install-BatteryTrayAutostart.ps1) over python.exe, whose console would
-' otherwise stay open for as long as the tray app runs.
-Dim fso, scriptDir, repoRoot, venvPythonw, pyExe, scriptPath, cmd
+' with zero visible console window. Delegates to Start-BatteryTray.ps1,
+' which installs Python/the venv/requirements if needed (same as
+' Install-BatteryTrayAutostart.ps1) before launching the app via
+' pythonw.exe.
+Dim fso, scriptDir, ps1Path, cmd
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
-repoRoot = fso.GetParentFolderName(scriptDir)
-venvPythonw = repoRoot & "\.venv\Scripts\pythonw.exe"
-scriptPath = scriptDir & "\battery_tray.py"
+ps1Path = scriptDir & "\Start-BatteryTray.ps1"
 
-If fso.FileExists(venvPythonw) Then
-    pyExe = venvPythonw
-Else
-    pyExe = "pythonw.exe"
-End If
-
-cmd = """" & pyExe & """ """ & scriptPath & """"
+cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & ps1Path & """"
 
 CreateObject("WScript.Shell").Run cmd, 0, False

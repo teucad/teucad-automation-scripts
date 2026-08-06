@@ -11,15 +11,9 @@ if (-not (Test-Path $scriptPath)) {
     throw "battery_tray.py not found at $scriptPath"
 }
 
-$venvPythonw = Join-Path (Split-Path $PSScriptRoot -Parent) ".venv\Scripts\pythonw.exe"
-if (Test-Path $venvPythonw) {
-    $pythonwPath = $venvPythonw
-} else {
-    $pythonw = Get-Command pythonw.exe -ErrorAction SilentlyContinue
-    if (-not $pythonw) {
-        throw "pythonw.exe not found (no .venv, and none on PATH). Install Python and ensure it's on PATH, or edit this script to point at your install."
-    }
-    $pythonwPath = $pythonw.Source
+$pythonwPath = & (Join-Path $PSScriptRoot "Ensure-Env.ps1")
+if (-not $pythonwPath -or -not (Test-Path $pythonwPath)) {
+    throw "Failed to resolve pythonw.exe via Ensure-Env.ps1"
 }
 
 $action = New-ScheduledTaskAction -Execute $pythonwPath -Argument "`"$scriptPath`"" -WorkingDirectory $PSScriptRoot
