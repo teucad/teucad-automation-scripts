@@ -26,7 +26,11 @@ Two distinct layouts share this prefix, handled separately below:
   battery, byte 7's low nibble is the case battery, byte 7's high nibble
   holds the three charging flags. Encoding is 0x0-0x9 = n*10+5%, 0xA = 100%,
   0xB-0xF = unavailable -- a different rounding convention than Max's, per
-  that reverse-engineering.
+  that reverse-engineering. The two pods are reported as a single device (a
+  "buds" list of per-pod readings, with the device's overall battery/charging
+  taken as the worst-case/either-charging across whichever pods are actually
+  out of the case) since they're one physical object to the user; the case
+  stays a separate device.
 """
 
 import asyncio
@@ -109,12 +113,26 @@ def _parse(data):
     charging_case = bool(charge_bits & 0x04)
 
     parts = []
+    # Left and right report as one combined device - a "pair" of earbuds is
+    # one physical object to the user, not two rows in the list. When only
+    # one pod is out of the case (the other still charging inside, or left
+    # behind), only that pod's reading is available and it becomes the
+    # device's sole battery/charging value.
+    buds = []
     left_pct = _dualpod_nibble_to_pct(left_nibble)
     if left_pct is not None:
-        parts.append({"name": f"{name} (Left)", "battery": left_pct, "charging": charging_left})
+        buds.append({"label": "L", "battery": left_pct, "charging": charging_left})
     right_pct = _dualpod_nibble_to_pct(right_nibble)
     if right_pct is not None:
-        parts.append({"name": f"{name} (Right)", "battery": right_pct, "charging": charging_right})
+        buds.append({"label": "R", "battery": right_pct, "charging": charging_right})
+    if buds:
+        parts.append({
+            "name": name,
+            "battery": min(b["battery"] for b in buds),
+            "charging": any(b["charging"] for b in buds),
+            "buds": buds,
+        })
+
     case_pct = _dualpod_nibble_to_pct(case_nibble)
     if case_pct is not None:
         parts.append({"name": f"{name} (Case)", "battery": case_pct, "charging": charging_case})

@@ -45,11 +45,6 @@ class Settings:
         self.path = path
         self.refresh_seconds = DEFAULT_REFRESH_SECONDS
         self.device_order = []
-        # Keyword/model-name matching can't identify a phone from a name
-        # like "eekumbokum" or "4" - a custom Bluetooth name the user set,
-        # and one that isn't even stable across reconnects. This maps such
-        # names (lowercased) straight to a category; edit settings.json's
-        # "category_overrides" by hand for devices with unrecognizable names.
         self.category_overrides = {}
         self._load()
 
@@ -179,6 +174,22 @@ def get_cached_batteries():
         return list(_last_devices)
 
 
+def format_battery_text(d):
+    """Renders a device's battery column. AirPods-style devices with more
+    than one pod currently out of the case (see airpods_ble.py's "buds")
+    show each pod's reading on the same line rather than as separate rows;
+    a device with only one pod present (or any other device) falls back to
+    the plain single percentage."""
+    buds = d.get("buds")
+    if buds and len(buds) > 1:
+        return " / ".join(
+            f"{b['battery']}%{b['label']}" + (" ⚡" if b.get("charging") else "")
+            for b in buds
+        )
+    suffix = " ⚡" if d.get("charging") else ""
+    return f"{d['battery']}%{suffix}"
+
+
 def battery_color(pct):
     if pct <= 20:
         return (220, 53, 69)
@@ -209,11 +220,12 @@ CATEGORY_KEYWORDS = [
 ]
 
 # Icon color per category, shown to the left of the device name in the
-# popup window - not on the tray icon. The three AirPods-style earbud
+# popup window - not on the tray icon. The AirPods-style earbud
 # sub-categories share the headphones color since they're the same family,
-# just distinguished by icon shape (left/right tilt, and the case).
+# just distinguished by icon shape (paired, left/right tilt, and the case).
 CATEGORY_COLORS = {
     "headphones": (217, 83, 79),
+    "earbud_pair": (217, 83, 79),
     "earbud_left": (217, 83, 79),
     "earbud_right": (217, 83, 79),
     "earbud_case": (217, 83, 79),
@@ -228,13 +240,15 @@ CATEGORY_COLORS = {
 
 # Display order and labels for the right-click "set category" menu.
 CATEGORY_ORDER = [
-    "mouse", "keyboard", "headphones", "earbud_left", "earbud_right",
-    "earbud_case", "controller", "speaker", "trackpad", "phone", "other",
+    "mouse", "keyboard", "headphones", "earbud_pair", "earbud_left",
+    "earbud_right", "earbud_case", "controller", "speaker", "trackpad",
+    "phone", "other",
 ]
 CATEGORY_LABELS = {
     "mouse": "Mouse",
     "keyboard": "Keyboard",
     "headphones": "Headphones",
+    "earbud_pair": "Earbuds (Pair)",
     "earbud_left": "Earbud (Left)",
     "earbud_right": "Earbud (Right)",
     "earbud_case": "Earbud (Case)",
@@ -260,6 +274,13 @@ def categorize_device(name, overrides=None):
                     return "earbud_right"
                 if lowered.endswith("(case)"):
                     return "earbud_case"
+                # AirPods Max is a single over-ear unit, not a pod pair, so
+                # it keeps the generic headphones icon; "airpods"/"AirPods
+                # Pro"/etc without a (Left)/(Right)/(Case) suffix is the
+                # merged two-pod device (see airpods_ble.py's "buds" list)
+                # and gets the side-by-side earbuds icon instead.
+                if "airpods" in lowered and "max" not in lowered:
+                    return "earbud_pair"
             return category
     return "other"
 
@@ -343,6 +364,23 @@ def _icon_earbud_right(d, s, color):
     _draw_earbud(d, s, color, mirror=False)
 
 
+def _icon_earbud_pair(d, s, color):
+    """Both AirPods-style earbuds side by side, tilted away from each
+    other - the icon for a merged two-pod device (see categorize_device's
+    "airpods, not max" case), distinct from the generic over-ear
+    _icon_headphones so a pair reads at a glance as earbuds, not a headset."""
+    lw = max(2, int(s * 0.05))
+    bud_w, bud_h = s * 0.26, s * 0.3
+    for bud_cx, sign in ((s * 0.28, -1), (s * 0.72, 1)):
+        bud_box = [bud_cx - bud_w / 2, s * 0.1, bud_cx + bud_w / 2, s * 0.1 + bud_h]
+        d.rounded_rectangle(bud_box, radius=bud_w / 2, outline=color, width=lw)
+        stem_top = (bud_cx, s * 0.1 + bud_h - s * 0.035)
+        stem_bottom = (bud_cx + sign * s * 0.16, s * 0.9)
+        d.line([stem_top, stem_bottom], fill=color, width=lw)
+        r = lw * 0.55
+        d.ellipse([stem_bottom[0] - r, stem_bottom[1] - r, stem_bottom[0] + r, stem_bottom[1] + r], fill=color)
+
+
 def _icon_earbud_case(d, s, color):
     lw = max(2, int(s * 0.055))
     d.rounded_rectangle([s*0.22, s*0.12, s*0.78, s*0.88], radius=s*0.16, outline=color, width=lw)
@@ -362,6 +400,7 @@ CATEGORY_ICON_DRAW = {
     "mouse": _icon_mouse,
     "keyboard": _icon_keyboard,
     "headphones": _icon_headphones,
+    "earbud_pair": _icon_earbud_pair,
     "earbud_left": _icon_earbud_left,
     "earbud_right": _icon_earbud_right,
     "earbud_case": _icon_earbud_case,
@@ -498,8 +537,7 @@ class BatteryWindow:
         font = tkfont.nametofont("TkDefaultFont")
         widest_row = 0
         for d in devices:
-            suffix = " ⚡" if d.get("charging") else ""
-            pct_text = f"{d['battery']}%{suffix}"
+            pct_text = format_battery_text(d)
             row_content = font.measure(d["name"]) + NAME_PCT_GAP + font.measure(pct_text)
             widest_row = max(widest_row, row_content)
         needed = ARROWS_WIDTH + ICON_BLOCK_WIDTH + widest_row
@@ -550,11 +588,9 @@ class BatteryWindow:
                 row, text=d["name"], anchor="w", fg="#eeeeee", bg="#1e1e1e", cursor="hand2",
             )
             name_label.pack(side="left", fill="x", expand=True)
-            pct = d["battery"]
-            suffix = " ⚡" if d.get("charging") else ""
-            color = "#{:02x}{:02x}{:02x}".format(*battery_color(pct))
+            color = "#{:02x}{:02x}{:02x}".format(*battery_color(d["battery"]))
             pct_label = tk.Label(
-                row, text=f"{pct}%{suffix}", fg=color, bg="#1e1e1e", anchor="e", cursor="hand2",
+                row, text=format_battery_text(d), fg=color, bg="#1e1e1e", anchor="e", cursor="hand2",
             )
             pct_label.pack(side="right")
 
@@ -685,10 +721,7 @@ def build_tooltip(devices, order):
     if not devices:
         return "Device Batteries: no devices found"
     shown = order_devices(devices, order)[:TOOLTIP_MAX_DEVICES]
-    return "\n".join(
-        f"{d['name']}: {d['battery']}%" + (" (charging)" if d.get("charging") else "")
-        for d in shown
-    )
+    return "\n".join(f"{d['name']}: {format_battery_text(d)}" for d in shown)
 
 
 def main():

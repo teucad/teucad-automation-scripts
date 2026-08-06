@@ -48,13 +48,15 @@ Run it directly (useful for testing — console stays open):
 .venv\Scripts\python battery-tray-monitor\battery_tray.py
 ```
 
+To start it manually without a console window (e.g. via a desktop/Start Menu shortcut), double-click `battery-tray-monitor\Start-BatteryTray.vbs` instead — it launches the same app via `pythonw.exe`.
+
 ### Autostart at logon
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Install-BatteryTrayAutostart.ps1
 ```
 
-Registers a scheduled task that launches the app hidden (via `pythonw.exe`, no console window) at every logon. To remove it:
+Registers a scheduled task that launches the app hidden (via `pythonw.exe`, no console window) at every logon, and starts it immediately. To remove it:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Uninstall-BatteryTrayAutostart.ps1
@@ -67,6 +69,7 @@ powershell -ExecutionPolicy Bypass -File battery-tray-monitor\Uninstall-BatteryT
 - `logitech_hidpp.py` — Logitech receiver/mouse battery via HID++
 - `battery_query.ps1` — BLE Battery Service + generic HID Battery Strength queries
 - `settings.json` — persisted refresh interval and device display order (created/updated automatically)
+- `Start-BatteryTray.vbs` — double-click entry point that starts the app with no console window
 
 ---
 

@@ -40,7 +40,7 @@ $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings 
     -Description "Runs the system-tray device battery monitor at logon."
 
 Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
+Start-ScheduledTask -TaskName $TaskName
 
-Write-Host "Scheduled task '$TaskName' installed. It will start the tray app at your next logon."
-Write-Host "To start it immediately without logging off/on, run:"
-Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Scheduled task '$TaskName' installed and the tray app has been started."
+Write-Host "It will also start automatically at every future logon."
